@@ -11,7 +11,8 @@ Job input (all optional except prompt and images):
     "aspect_ratio": "9:16 (Portrait Widescreen)",
     "megapixels": 0.4,
     "turbo": true,                       # true = 4-step lightning LoRA (fast), false = 20 steps
-    "nsfw_lora": false                   # enables the HMNSFW LoRA switch in the workflow (off by default)
+    "nsfw_lora": false,                  # legacy: HMNSFW LoRA on/off (ignored when "loras" is given)
+    "loras": [ {"name": "h3-realism-people-t2v-i2v-r2v", "strength": 0.5}, ... ]   # optional; LoRAs not listed are OFF
   }
 }
 """
@@ -43,6 +44,45 @@ SEED_NODE = "129"
 RES_NODE = "115"
 TURBO_NODE = "146"
 NSFW_NODE = "148"
+REALISM_NODE = "147"
+SWITCH_NODE = "141"
+LORA_DIR = os.path.join(os.environ.get("MODELS_DIR", "/runpod-volume/ComfyUI/models"), "loras")
+
+
+def find_lora(name):
+    """Find a LoRA file on the volume by name (with or without folder/extension)."""
+    want = name.replace("\\", "/").rsplit("/", 1)[-1]
+    want = os.path.splitext(want)[0].lower() if want.lower().endswith((".safetensors", ".pt", ".ckpt")) else want.lower()
+    for root, _, files in os.walk(LORA_DIR):
+        for f in files:
+            if os.path.splitext(f)[0].lower() == want:
+                return os.path.relpath(os.path.join(root, f), LORA_DIR).replace("\\", "/")
+    raise RuntimeError(f"LoRA not found on volume: {name}")
+
+
+def apply_loras(wf, loras):
+    chain = {}
+    for l in loras:
+        chain[find_lora(l["name"])] = float(l.get("strength", 1.0))
+    # existing chain nodes: switch them on/off and set strength
+    last = NSFW_NODE
+    for nid in (REALISM_NODE, NSFW_NODE):
+        f = wf[nid]["inputs"]["lora_name"]
+        wf[nid]["inputs"]["strength_model"] = chain.pop(f, 0.0) if f in chain else 0.0
+    # any extra LoRAs get appended after the last existing one
+    n = 900
+    for f, strength in chain.items():
+        # an entry may match an existing node under a different folder prefix
+        existing = [i for i in (REALISM_NODE, NSFW_NODE) if wf[i]["inputs"]["lora_name"].rsplit("/", 1)[-1] == f.rsplit("/", 1)[-1]]
+        if existing:
+            wf[existing[0]]["inputs"]["lora_name"] = f
+            wf[existing[0]]["inputs"]["strength_model"] = strength
+            continue
+        nid = str(n); n += 1
+        wf[nid] = {"class_type": "LoraLoaderModelOnly",
+                   "inputs": {"lora_name": f, "strength_model": strength, "model": [last, 0]}}
+        last = nid
+    wf[SWITCH_NODE]["inputs"]["on_true"] = [last, 0]
 
 
 def start_comfy():
@@ -112,7 +152,10 @@ def build_workflow(inp):
     # In the workflow the switch node 141 picks the NSFW-LoRA model when TURBO is true.
     # Keep behaviour explicit: turbo=true uses the lightning+realism(+nsfw) chain.
     # nsfw_lora=false keeps the HMNSFW LoRA at strength 0 so it has no effect.
-    wf[NSFW_NODE]["inputs"]["strength_model"] = 1.0 if inp.get("nsfw_lora") else 0.0
+    if inp.get("loras") is not None:
+        apply_loras(wf, inp["loras"])
+    else:
+        wf[NSFW_NODE]["inputs"]["strength_model"] = 1.0 if inp.get("nsfw_lora") else 0.0
     return wf
 
 
