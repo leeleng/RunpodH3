@@ -137,12 +137,18 @@ def build_workflow(inp):
         wf[REF_NODE]["inputs"].pop(f"ref_images.ref_image_{i}", None)
         wf.pop(IMAGE_NODES[i], None)
 
-    audio = inp.get("audio")
-    if audio:
-        wf[AUDIO_NODE]["inputs"]["audio"] = save_file(audio, "voice.wav")
-    else:
-        wf[REF_NODE]["inputs"].pop("ref_audios.ref_audio_0", None)
-        wf.pop(AUDIO_NODE, None)
+    # 參考聲：input.audios（陣列，最多 3 把，次序＝<Audio 1>、<Audio 2>…）；舊 input.audio（單把）照用
+    audios = inp.get("audios") or ([inp["audio"]] if inp.get("audio") else [])
+    if len(audios) > 3:
+        raise ValueError("Maximum 3 reference voices")
+    for k in [k for k in wf[REF_NODE]["inputs"] if k.startswith("ref_audios.ref_audio_")]:
+        wf[REF_NODE]["inputs"].pop(k)
+    wf.pop(AUDIO_NODE, None)
+    for i, item in enumerate(audios):
+        node_id = AUDIO_NODE if i == 0 else str(960 + i)
+        wf[node_id] = {"class_type": "LoadAudio",
+                       "inputs": {"audio": save_file(item, f"voice{i}.wav")}}
+        wf[REF_NODE]["inputs"][f"ref_audios.ref_audio_{i}"] = [node_id, 0]
 
     wf[DURATION_NODE]["inputs"]["value"] = float(inp.get("duration", 13))
     wf[SEED_NODE]["inputs"]["noise_seed"] = int(inp.get("seed", random.randint(0, 2**50)))
